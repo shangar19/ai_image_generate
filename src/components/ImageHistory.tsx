@@ -3,16 +3,20 @@ import { History, Download, Trash2, Calendar, Loader2, AlertCircle } from 'lucid
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 
-interface GeneratedImage {
+interface HistoryImage {
   id: string;
   prompt: string;
-  image_url: string;
+  image_path: string;
   created_at: string;
+}
+
+interface DisplayImage extends HistoryImage {
+  signedUrl: string;
 }
 
 const ImageHistory: React.FC = () => {
   const { user } = useAuth();
-  const [images, setImages] = useState<GeneratedImage[]>([]);
+  const [images, setImages] = useState<DisplayImage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
@@ -24,21 +28,35 @@ const ImageHistory: React.FC = () => {
   }, [user]);
 
   const fetchImages = async () => {
+    if (!user) return;
     try {
       setLoading(true);
       setError('');
 
       const { data, error } = await supabase
         .from('generated_images')
-        .select('*')
-        .eq('user_id', user?.id)
+        .select('id, prompt, image_path, created_at')
+        .eq('user_id', user.id)
         .order('created_at', { ascending: false });
 
-      if (error) {
-        throw error;
-      }
+      if (error) throw error;
+      if (!data) return;
 
-      setImages(data || []);
+      const imagesWithSignedUrls = await Promise.all(
+        data.map(async (image) => {
+          const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+            .from('generated_images')
+            .createSignedUrl(image.image_path, 3600); // 1 hour expiry
+
+          if (signedUrlError) {
+            console.error('Error creating signed URL for', image.image_path, signedUrlError);
+            return { ...image, signedUrl: '' };
+          }
+          return { ...image, signedUrl: signedUrlData.signedUrl };
+        })
+      );
+
+      setImages(imagesWithSignedUrls.filter(img => img.signedUrl));
     } catch (err: any) {
       console.error('Error fetching images:', err);
       setError('Failed to load image history');
@@ -47,9 +65,9 @@ const ImageHistory: React.FC = () => {
     }
   };
 
-  const handleDownload = async (image: GeneratedImage) => {
+  const handleDownload = async (image: DisplayImage) => {
     try {
-      const response = await fetch(image.image_url);
+      const response = await fetch(image.signedUrl);
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -64,32 +82,39 @@ const ImageHistory: React.FC = () => {
     }
   };
 
-  const handleDelete = async (imageId: string) => {
-    if (!confirm('Are you sure you want to delete this image?')) {
+  const handleDelete = async (image: DisplayImage) => {
+    if (!confirm('Are you sure you want to delete this image? This cannot be undone.')) {
       return;
     }
+    if (!user) return;
 
     try {
-      setDeletingIds(prev => new Set(prev).add(imageId));
+      setDeletingIds(prev => new Set(prev).add(image.id));
 
-      const { error } = await supabase
+      const { error: storageError } = await supabase.storage
         .from('generated_images')
-        .delete()
-        .eq('id', imageId)
-        .eq('user_id', user?.id);
+        .remove([image.image_path]);
 
-      if (error) {
-        throw error;
+      if (storageError) {
+        console.error('Error deleting from storage:', storageError);
       }
 
-      setImages(prev => prev.filter(img => img.id !== imageId));
+      const { error: dbError } = await supabase
+        .from('generated_images')
+        .delete()
+        .eq('id', image.id)
+        .eq('user_id', user.id);
+
+      if (dbError) throw dbError;
+
+      setImages(prev => prev.filter(img => img.id !== image.id));
     } catch (err: any) {
       console.error('Error deleting image:', err);
       setError('Failed to delete image');
     } finally {
       setDeletingIds(prev => {
         const newSet = new Set(prev);
-        newSet.delete(imageId);
+        newSet.delete(image.id);
         return newSet;
       });
     }
@@ -165,7 +190,7 @@ const ImageHistory: React.FC = () => {
               >
                 <div className="aspect-square relative group">
                   <img
-                    src={image.image_url}
+                    src={image.signedUrl}
                     alt={image.prompt}
                     className="w-full h-full object-cover"
                     loading="lazy"
@@ -180,7 +205,7 @@ const ImageHistory: React.FC = () => {
                         <Download className="w-5 h-5" />
                       </button>
                       <button
-                        onClick={() => handleDelete(image.id)}
+                        onClick={() => handleDelete(image)}
                         disabled={deletingIds.has(image.id)}
                         className="p-2 bg-red-500/20 hover:bg-red-500/30 text-white rounded-lg backdrop-blur-sm transition-all duration-200 disabled:opacity-50"
                         title="Delete"

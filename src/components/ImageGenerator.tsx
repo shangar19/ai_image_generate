@@ -3,9 +3,11 @@ import { Wand2, Download, Share2, Loader2, AlertCircle, Sparkles, Zap, Palette, 
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { v4 as uuidv4 } from 'uuid';
 
 interface GeneratedImage {
-  url: string;
+  signedUrl: string;
+  path: string;
   prompt: string;
   timestamp: number;
 }
@@ -41,20 +43,13 @@ const ImageGenerator: React.FC = () => {
 
   const [currentLoadingMessage, setCurrentLoadingMessage] = useState<string>(loadingMessages[0]);
 
-  // Save image to database
-  const saveImageToDatabase = async (imageUrl: string, prompt: string) => {
+  const saveImageToDatabase = async (imagePath: string, prompt: string) => {
     if (!user) return;
 
     try {
       const { error } = await supabase
         .from('generated_images')
-        .insert([
-          {
-            user_id: user.id,
-            prompt: prompt,
-            image_url: imageUrl,
-          },
-        ]);
+        .insert([{ user_id: user.id, prompt, image_path: imagePath }]);
 
       if (error) {
         console.error('Error saving image to database:', error);
@@ -65,7 +60,7 @@ const ImageGenerator: React.FC = () => {
   };
 
   const handleGenerate = async (): Promise<void> => {
-    if (!prompt.trim()) {
+    if (!prompt.trim() || !user) {
       setError('Please enter a prompt to generate an image');
       return;
     }
@@ -76,79 +71,69 @@ const ImageGenerator: React.FC = () => {
     setGeneratedImage(null);
     setShareSuccess(false);
 
-    // Animate loading messages
     const messageInterval = setInterval(() => {
       setCurrentLoadingMessage(loadingMessages[Math.floor(Math.random() * loadingMessages.length)]);
     }, 2000);
 
     try {
-      // Show that we're waiting for webhook after initial delay
       const webhookTimeout = setTimeout(() => {
         setWaitingForWebhook(true);
         setCurrentLoadingMessage("⏳ Waiting for webhook response...");
       }, 3000);
 
-      // Configure axios with longer timeout for webhook response
       const response = await axios.post('https://n8n.srv834342.hstgr.cloud/webhook-test/create_image', {
         prompt: prompt.trim(),
       }, {
-        timeout: 60000, // 60 seconds timeout for webhook response
-        headers: {
-          'Content-Type': 'application/json',
-        }
+        timeout: 60000,
+        headers: { 'Content-Type': 'application/json' }
       });
 
       clearTimeout(webhookTimeout);
 
-      // Validate webhook response structure
-      if (!response.data) {
-        throw new Error('No data received from webhook');
+      if (!response.data?.[0]?.url) {
+        throw new Error('Invalid response from webhook');
       }
 
-      if (!Array.isArray(response.data)) {
-        throw new Error('Invalid response format from webhook');
-      }
+      const publicUrl = response.data[0].url;
 
-      if (response.data.length === 0) {
-        throw new Error('Empty response array from webhook');
-      }
+      // Secure the image
+      setCurrentLoadingMessage("🔄 Securing your image...");
+      const imageResponse = await fetch(publicUrl);
+      if (!imageResponse.ok) throw new Error('Failed to download image from source');
+      const imageBlob = await imageResponse.blob();
 
-      if (!response.data[0] || !response.data[0].url) {
-        throw new Error('No image URL in webhook response');
-      }
+      const fileName = `${uuidv4()}.png`;
+      const filePath = `${user.id}/${fileName}`;
 
-      // Successfully received webhook response
+      const { error: uploadError } = await supabase.storage
+        .from('generated_images')
+        .upload(filePath, imageBlob);
+      if (uploadError) throw uploadError;
+
+      const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+        .from('generated_images')
+        .createSignedUrl(filePath, 3600); // 1 hour expiry
+      if (signedUrlError) throw signedUrlError;
+
       const newImage = {
-        url: response.data[0].url,
+        signedUrl: signedUrlData.signedUrl,
+        path: filePath,
         prompt: prompt.trim(),
         timestamp: Date.now(),
       };
 
       setGeneratedImage(newImage);
       setCurrentLoadingMessage("✅ Image generated successfully!");
-
-      // Save to database
-      await saveImageToDatabase(newImage.url, newImage.prompt);
+      await saveImageToDatabase(newImage.path, newImage.prompt);
 
     } catch (err: any) {
       console.error('Error generating image:', err);
-      
-      // Enhanced error handling
       let errorMessage = 'Failed to generate image. Please try again.';
-      
       if (err.code === 'ECONNABORTED') {
-        errorMessage = 'Request timed out. The webhook is taking longer than expected. Please try again.';
-      } else if (err.response) {
-        // Server responded with error status
-        errorMessage = `Webhook error (${err.response.status}): ${err.response.statusText}`;
-      } else if (err.request) {
-        // Request was made but no response received
-        errorMessage = 'No response from webhook. Please check your connection and try again.';
+        errorMessage = 'Request timed out. The webhook is taking longer than expected.';
       } else if (err.message) {
-        // Custom error messages from validation
         errorMessage = err.message;
       }
-      
       setError(errorMessage);
     } finally {
       clearInterval(messageInterval);
@@ -164,9 +149,8 @@ const ImageGenerator: React.FC = () => {
 
   const handleDownload = async (): Promise<void> => {
     if (!generatedImage) return;
-
     try {
-      const response = await fetch(generatedImage.url);
+      const response = await fetch(generatedImage.signedUrl);
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -177,8 +161,7 @@ const ImageGenerator: React.FC = () => {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
     } catch (err) {
-      console.error('Error downloading image:', err);
-      setError('Failed to download image. Please try again.');
+      setError('Failed to download image.');
     }
   };
 
@@ -187,60 +170,31 @@ const ImageGenerator: React.FC = () => {
 
     setShareSuccess(false);
     setError('');
+    
+    // Share the temporary signed URL
+    const shareUrl = generatedImage.signedUrl;
 
-    // First try the Web Share API if available and user gesture is valid
     if (navigator.share) {
       try {
         await navigator.share({
           title: 'AI Generated Image',
           text: `Check out this AI-generated image: "${generatedImage.prompt}"`,
-          url: generatedImage.url, // Share the actual image URL instead of window location
+          url: shareUrl,
         });
         setShareSuccess(true);
         return;
-      } catch (shareErr: any) {
-        console.log('Web Share API failed, falling back to clipboard:', shareErr.message);
-        // Continue to fallback options below
+      } catch (shareErr) {
+        // Fallback to clipboard
       }
     }
 
-    // Fallback 1: Try to copy image URL to clipboard
     try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(generatedImage.url);
-        setShareSuccess(true);
-        setTimeout(() => setShareSuccess(false), 3000); // Hide success message after 3 seconds
-        return;
-      }
-    } catch (clipboardErr) {
-      console.log('Clipboard API failed, trying fallback method:', clipboardErr);
+      await navigator.clipboard.writeText(shareUrl);
+      setShareSuccess(true);
+      setTimeout(() => setShareSuccess(false), 3000);
+    } catch (err) {
+      setError('Unable to copy the image URL.');
     }
-
-    // Fallback 2: Create a temporary text area for older browsers
-    try {
-      const textArea = document.createElement('textarea');
-      textArea.value = generatedImage.url;
-      textArea.style.position = 'fixed';
-      textArea.style.left = '-999999px';
-      textArea.style.top = '-999999px';
-      document.body.appendChild(textArea);
-      textArea.focus();
-      textArea.select();
-      
-      const copied = document.execCommand('copy');
-      document.body.removeChild(textArea);
-      
-      if (copied) {
-        setShareSuccess(true);
-        setTimeout(() => setShareSuccess(false), 3000);
-        return;
-      }
-    } catch (execErr) {
-      console.log('execCommand fallback failed:', execErr);
-    }
-
-    // If all methods fail, show error
-    setError('Unable to share or copy the image URL. Please try manually copying the image link.');
   };
 
   return (
@@ -305,7 +259,7 @@ const ImageGenerator: React.FC = () => {
           {shareSuccess && (
             <div className="flex items-center space-x-2 text-green-400 bg-green-400/10 p-3 rounded-lg">
               <CheckCircle className="w-5 h-5 flex-shrink-0" />
-              <span className="text-sm">Image URL copied to clipboard successfully!</span>
+              <span className="text-sm">Secure image URL copied to clipboard!</span>
             </div>
           )}
 
@@ -386,39 +340,6 @@ const ImageGenerator: React.FC = () => {
               {/* Shimmer Effect */}
               <div className="absolute inset-0 -skew-x-12 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-shimmer rounded-xl"></div>
             </div>
-
-            {/* Processing Steps */}
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-              <div className="flex items-center space-x-3 p-3 bg-dark-300 rounded-lg">
-                <div className="w-3 h-3 bg-primary-500 rounded-full animate-pulse"></div>
-                <span className="text-sm text-gray-300">Analyzing prompt</span>
-              </div>
-              <div className="flex items-center space-x-3 p-3 bg-dark-300 rounded-lg">
-                <div className="w-3 h-3 bg-purple-500 rounded-full animate-pulse" style={{ animationDelay: '0.5s' }}></div>
-                <span className="text-sm text-gray-300">Sending to webhook</span>
-              </div>
-              <div className="flex items-center space-x-3 p-3 bg-dark-300 rounded-lg">
-                <div className={`w-3 h-3 rounded-full animate-pulse ${waitingForWebhook ? 'bg-yellow-500' : 'bg-blue-500'}`} style={{ animationDelay: '1s' }}></div>
-                <span className="text-sm text-gray-300">Processing response</span>
-              </div>
-              <div className="flex items-center space-x-3 p-3 bg-dark-300 rounded-lg">
-                <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse" style={{ animationDelay: '1.5s' }}></div>
-                <span className="text-sm text-gray-300">Finalizing image</span>
-              </div>
-            </div>
-
-            {/* Webhook Status */}
-            {waitingForWebhook && (
-              <div className="bg-yellow-400/10 border border-yellow-400/30 rounded-lg p-4">
-                <div className="flex items-center space-x-2">
-                  <Clock className="w-5 h-5 text-yellow-400 animate-spin" />
-                  <div>
-                    <p className="text-yellow-400 font-medium text-sm">Webhook Processing</p>
-                    <p className="text-yellow-300 text-xs">Waiting for response from n8n.srv834342.hstgr.cloud</p>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         </div>
       )}
@@ -438,7 +359,7 @@ const ImageGenerator: React.FC = () => {
 
             <div className="relative group">
               <img
-                src={generatedImage.url}
+                src={generatedImage.signedUrl}
                 alt={generatedImage.prompt}
                 className="w-full rounded-xl shadow-2xl transition-transform duration-300 group-hover:scale-[1.02]"
                 onError={(e) => {
