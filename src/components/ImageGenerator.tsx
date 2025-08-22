@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Wand2, Download, Share2, Loader2, AlertCircle, Sparkles, Zap, Palette, Clock, Copy, CheckCircle } from 'lucide-react';
+import { Wand2, Download, Share2, Loader2, AlertCircle, Sparkles, Zap, Palette, Clock, Copy, CheckCircle, Settings } from 'lucide-react';
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
@@ -19,6 +19,7 @@ const ImageGenerator: React.FC = () => {
   const [error, setError] = useState<string>('');
   const [waitingForWebhook, setWaitingForWebhook] = useState<boolean>(false);
   const [shareSuccess, setShareSuccess] = useState<boolean>(false);
+  const [debugInfo, setDebugInfo] = useState<string>('');
 
   const samplePrompts = [
     "A majestic dragon flying over a mystical forest with glowing mushrooms",
@@ -58,6 +59,32 @@ const ImageGenerator: React.FC = () => {
     }
   };
 
+  const testEdgeFunction = async (): Promise<boolean> => {
+    try {
+      console.log('Testing Edge Function connectivity...');
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error('No valid session found');
+      }
+
+      const { data, error } = await supabase.functions.invoke('secure-image-uploader', {
+        body: { test: true },
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      console.log('Edge Function test response:', data);
+      console.log('Edge Function test error:', error);
+      
+      return !error;
+    } catch (err) {
+      console.error('Edge Function test failed:', err);
+      return false;
+    }
+  };
+
   const handleGenerate = async (): Promise<void> => {
     if (!prompt.trim() || !user) {
       setError('Please enter a prompt to generate an image');
@@ -69,17 +96,31 @@ const ImageGenerator: React.FC = () => {
     setError('');
     setGeneratedImage(null);
     setShareSuccess(false);
+    setDebugInfo('');
 
     const messageInterval = setInterval(() => {
       setCurrentLoadingMessage(loadingMessages[Math.floor(Math.random() * loadingMessages.length)]);
     }, 2000);
 
     try {
+      // Step 1: Test Edge Function availability
+      console.log('Step 1: Testing Edge Function...');
+      setCurrentLoadingMessage("🔧 Checking system connectivity...");
+      
+      const edgeFunctionAvailable = await testEdgeFunction();
+      if (!edgeFunctionAvailable) {
+        throw new Error('Edge Function is not available. Please ensure it is deployed to your Supabase project.');
+      }
+
+      // Step 2: Generate image via webhook
       const webhookTimeout = setTimeout(() => {
         setWaitingForWebhook(true);
         setCurrentLoadingMessage("⏳ Waiting for image engine response...");
       }, 3000);
 
+      console.log('Step 2: Sending request to webhook...');
+      setCurrentLoadingMessage("🎨 Generating your image...");
+      
       const response = await axios.post('https://n8n.srv834342.hstgr.cloud/webhook-test/create_image', {
         prompt: prompt.trim(),
       }, {
@@ -88,28 +129,88 @@ const ImageGenerator: React.FC = () => {
       });
 
       clearTimeout(webhookTimeout);
+      console.log('Webhook response received:', response.data);
 
       if (!response.data?.[0]?.url) {
-        throw new Error('Invalid response from webhook');
+        throw new Error('Invalid response from webhook - no image URL found');
       }
 
       const publicUrl = response.data[0].url;
+      console.log('Public image URL:', publicUrl);
+      setDebugInfo(`Image generated: ${publicUrl}`);
 
-      // Secure the image using the Edge Function
+      // Step 3: Get user session for authorization
+      console.log('Step 3: Getting user session...');
+      setCurrentLoadingMessage("🔐 Preparing secure storage...");
+      
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error('No valid session found. Please try signing out and signing in again.');
+      }
+
+      console.log('Session obtained, user ID:', session.user.id);
+
+      // Step 4: Secure the image using Edge Function
+      console.log('Step 4: Securing image via Edge Function...');
       setCurrentLoadingMessage("🔄 Securing your image...");
+      
+      const functionPayload = { imageUrl: publicUrl };
+      console.log('Calling Edge Function with payload:', functionPayload);
+      
       const { data: functionData, error: functionError } = await supabase.functions.invoke('secure-image-uploader', {
-        body: { imageUrl: publicUrl },
+        body: functionPayload,
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json'
+        }
       });
 
-      if (functionError) throw functionError;
-      if (functionData.error) throw new Error(`Edge function error: ${functionData.error}`);
+      console.log('Edge Function response data:', functionData);
+      console.log('Edge Function error:', functionError);
+
+      if (functionError) {
+        console.error('Edge Function error details:', functionError);
+        setDebugInfo(`Edge Function error: ${JSON.stringify(functionError)}`);
+        
+        if (functionError.message?.includes('Failed to fetch')) {
+          throw new Error('Edge Function deployment issue. Please ensure the "secure-image-uploader" function is deployed to your Supabase project.');
+        }
+        
+        throw new Error(`Edge Function failed: ${functionError.message}`);
+      }
+      
+      if (functionData?.error) {
+        console.error('Edge Function returned error:', functionData.error);
+        setDebugInfo(`Edge Function internal error: ${functionData.error}`);
+        throw new Error(`Image security processing failed: ${functionData.error}`);
+      }
+
+      if (!functionData?.path) {
+        console.error('No path returned from Edge Function:', functionData);
+        setDebugInfo(`Invalid Edge Function response: ${JSON.stringify(functionData)}`);
+        throw new Error('Edge Function did not return a valid file path');
+      }
 
       const filePath = functionData.path;
+      console.log('Image secured at path:', filePath);
+      setDebugInfo(`Image secured at: ${filePath}`);
 
+      // Step 5: Create signed URL for access
+      console.log('Step 5: Creating signed URL...');
+      setCurrentLoadingMessage("🔗 Creating secure access URL...");
+      
       const { data: signedUrlData, error: signedUrlError } = await supabase.storage
         .from('generated_images')
         .createSignedUrl(filePath, 3600); // 1 hour expiry
-      if (signedUrlError) throw signedUrlError;
+      
+      if (signedUrlError) {
+        console.error('Signed URL error:', signedUrlError);
+        setDebugInfo(`Signed URL error: ${JSON.stringify(signedUrlError)}`);
+        throw new Error(`Failed to create secure access URL: ${signedUrlError.message}`);
+      }
+
+      console.log('Signed URL created successfully');
+      setDebugInfo('Image generation completed successfully!');
 
       const newImage = {
         signedUrl: signedUrlData.signedUrl,
@@ -120,17 +221,32 @@ const ImageGenerator: React.FC = () => {
 
       setGeneratedImage(newImage);
       setCurrentLoadingMessage("✅ Image generated successfully!");
+      
+      // Step 6: Save to database
       await saveImageToDatabase(newImage.path, newImage.prompt);
 
     } catch (err: any) {
       console.error('Error generating image:', err);
       let errorMessage = 'Failed to generate image. Please try again.';
+      
       if (err.code === 'ECONNABORTED') {
-        errorMessage = 'Request timed out. The webhook is taking longer than expected.';
+        errorMessage = 'Request timed out. The image generation service may be experiencing high load.';
+      } else if (err.response?.status === 404) {
+        errorMessage = 'Image generation service is currently unavailable. Please try again later.';
+      } else if (err.response?.status >= 500) {
+        errorMessage = 'Image generation service is experiencing technical difficulties.';
+      } else if (err.message?.includes('Edge Function')) {
+        errorMessage = `${err.message}\n\nTroubleshooting:\n1. Ensure the Edge Function is deployed\n2. Check environment variables (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)\n3. Verify storage bucket permissions`;
+      } else if (err.message?.includes('session')) {
+        errorMessage = `${err.message}\n\nPlease try signing out and signing in again.`;
       } else if (err.message) {
         errorMessage = err.message;
       }
+      
       setError(errorMessage);
+      if (debugInfo) {
+        console.log('Debug info:', debugInfo);
+      }
     } finally {
       clearInterval(messageInterval);
       setIsGenerating(false);
@@ -167,7 +283,6 @@ const ImageGenerator: React.FC = () => {
     setShareSuccess(false);
     setError('');
     
-    // Share the temporary signed URL
     const shareUrl = generatedImage.signedUrl;
 
     if (navigator.share) {
@@ -246,9 +361,20 @@ const ImageGenerator: React.FC = () => {
           </div>
 
           {error && (
-            <div className="flex items-center space-x-2 text-red-400 bg-red-400/10 p-3 rounded-lg">
-              <AlertCircle className="w-5 h-5 flex-shrink-0" />
-              <span className="text-sm">{error}</span>
+            <div className="flex items-start space-x-2 text-red-400 bg-red-400/10 p-4 rounded-lg">
+              <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+              <div className="text-sm">
+                <p className="font-medium mb-1">Generation Failed</p>
+                <pre className="whitespace-pre-wrap text-xs">{error}</pre>
+                {debugInfo && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-red-300 hover:text-red-200">
+                      Debug Information
+                    </summary>
+                    <pre className="mt-1 text-xs text-red-300 whitespace-pre-wrap">{debugInfo}</pre>
+                  </details>
+                )}
+              </div>
             </div>
           )}
 
@@ -392,6 +518,33 @@ const ImageGenerator: React.FC = () => {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Setup Instructions */}
+      {!isGenerating && (
+        <div className="bg-dark-200/50 rounded-xl p-4 border border-dark-300/50 mt-8">
+          <details className="group">
+            <summary className="flex items-center space-x-2 cursor-pointer text-gray-300 hover:text-white transition-colors">
+              <Settings className="w-4 h-4" />
+              <span className="text-sm font-medium">Setup Instructions</span>
+              <ChevronDown className="w-4 h-4 group-open:rotate-180 transition-transform" />
+            </summary>
+            <div className="mt-3 space-y-2 text-xs text-gray-400">
+              <p><strong>If you're experiencing issues:</strong></p>
+              <ol className="list-decimal list-inside space-y-1 ml-2">
+                <li>Ensure the Edge Function "secure-image-uploader" is deployed to your Supabase project</li>
+                <li>Set environment variables in Supabase Dashboard → Edge Functions → Settings:
+                  <ul className="list-disc list-inside ml-4 mt-1">
+                    <li><code>SUPABASE_URL</code>: Your project URL</li>
+                    <li><code>SUPABASE_SERVICE_ROLE_KEY</code>: Your service role key</li>
+                  </ul>
+                </li>
+                <li>Create a storage bucket named "generated_images" with private access</li>
+                <li>Verify the webhook URL is accessible and returns valid image URLs</li>
+              </ol>
+            </div>
+          </details>
         </div>
       )}
     </div>
