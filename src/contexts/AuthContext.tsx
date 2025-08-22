@@ -50,7 +50,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         .eq('id', userId)
         .single();
 
-      if (error && error.code !== 'PGRST116') {
+      if (error && error.code !== 'PGRST116') { // PGRST116 means no rows found, which is not an error in this context
         console.error('Error fetching user profile:', error);
         return;
       }
@@ -62,19 +62,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   };
 
   useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      
-      if (session?.user) {
-        fetchUserProfile(session.user.id);
-      }
-      
-      setLoading(false);
-    });
-
-    // Listen for auth changes
+    // onAuthStateChange fires an event immediately with the current session.
+    // This is the recommended way to handle auth state, as it covers all cases:
+    // initial load, sign in, sign out, token refresh, etc.
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, session) => {
@@ -87,11 +77,17 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         setUserProfile(null);
       }
       
+      // Once the initial auth state is determined (even if it's a null session),
+      // we can stop showing the main loader.
       setLoading(false);
     });
 
-    return () => subscription.unsubscribe();
-  }, []);
+    // The cleanup function unsubscribes from the listener when the component unmounts.
+    // This is crucial to prevent memory leaks, especially with React's StrictMode.
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []); // The empty dependency array ensures this effect runs only once on mount.
 
   const signUp = async (email: string, password: string, name: string) => {
     try {
