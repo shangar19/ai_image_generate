@@ -41,53 +41,45 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Fetch user profile
-  const fetchUserProfile = async (userId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from('user_profiles')
-        .select('*')
-        .eq('id', userId)
-        .single();
-
-      if (error && error.code !== 'PGRST116') { // PGRST116 means no rows found, which is not an error in this context
-        console.error('Error fetching user profile:', error);
-        return;
-      }
-
-      setUserProfile(data);
-    } catch (error) {
-      console.error('Error fetching user profile:', error);
-    }
-  };
-
+  // Effect for handling authentication state changes
   useEffect(() => {
-    // onAuthStateChange fires an event immediately with the current session.
-    // This is the recommended way to handle auth state, as it covers all cases:
-    // initial load, sign in, sign out, token refresh, etc.
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    // This effect handles the core authentication state.
+    // It listens for changes and updates the user and session.
+    // Crucially, it sets the main loading flag to false once the initial state is known.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       setUser(session?.user ?? null);
-      
-      if (session?.user) {
-        await fetchUserProfile(session.user.id);
-      } else {
-        setUserProfile(null);
-      }
-      
-      // Once the initial auth state is determined (even if it's a null session),
-      // we can stop showing the main loader.
       setLoading(false);
     });
 
-    // The cleanup function unsubscribes from the listener when the component unmounts.
-    // This is crucial to prevent memory leaks, especially with React's StrictMode.
     return () => {
       subscription.unsubscribe();
     };
-  }, []); // The empty dependency array ensures this effect runs only once on mount.
+  }, []);
+
+  // Effect for fetching user profile when user object changes
+  useEffect(() => {
+    // This effect is responsible for fetching the user's profile data.
+    // It runs whenever the `user` object changes (i.e., on login or logout).
+    if (user) {
+      supabase
+        .from('user_profiles')
+        .select('*')
+        .eq('id', user.id)
+        .single()
+        .then(({ data, error }) => {
+          if (error && error.code !== 'PGRST116') { // Ignore 'No rows found' error
+            console.error('Error fetching user profile:', error);
+            setUserProfile(null); // Set to null on error
+          } else {
+            setUserProfile(data);
+          }
+        });
+    } else {
+      // If there is no user, ensure the profile is also null.
+      setUserProfile(null);
+    }
+  }, [user]);
 
   const signUp = async (email: string, password: string, name: string) => {
     try {
