@@ -3,7 +3,6 @@ import { Wand2, Download, Share2, Loader2, AlertCircle, Sparkles, Zap, Palette, 
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
-import { v4 as uuidv4 } from 'uuid';
 
 interface GeneratedImage {
   signedUrl: string;
@@ -37,7 +36,7 @@ const ImageGenerator: React.FC = () => {
     "🌟 Bringing imagination to life...",
     "🎭 Adding artistic touches...",
     "🔮 Processing creative energy...",
-    "⏳ Waiting for webhook response...",
+    "⏳ Waiting for image engine response...",
     "🚀 AI engines working hard..."
   ];
 
@@ -78,7 +77,7 @@ const ImageGenerator: React.FC = () => {
     try {
       const webhookTimeout = setTimeout(() => {
         setWaitingForWebhook(true);
-        setCurrentLoadingMessage("⏳ Waiting for webhook response...");
+        setCurrentLoadingMessage("⏳ Waiting for image engine response...");
       }, 3000);
 
       const response = await axios.post('https://n8n.srv834342.hstgr.cloud/webhook-test/create_image', {
@@ -96,19 +95,16 @@ const ImageGenerator: React.FC = () => {
 
       const publicUrl = response.data[0].url;
 
-      // Secure the image
+      // Secure the image using the Edge Function
       setCurrentLoadingMessage("🔄 Securing your image...");
-      const imageResponse = await fetch(publicUrl);
-      if (!imageResponse.ok) throw new Error('Failed to download image from source');
-      const imageBlob = await imageResponse.blob();
+      const { data: functionData, error: functionError } = await supabase.functions.invoke('secure-image-uploader', {
+        body: { imageUrl: publicUrl },
+      });
 
-      const fileName = `${uuidv4()}.png`;
-      const filePath = `${user.id}/${fileName}`;
+      if (functionError) throw functionError;
+      if (functionData.error) throw new Error(`Edge function error: ${functionData.error}`);
 
-      const { error: uploadError } = await supabase.storage
-        .from('generated_images')
-        .upload(filePath, imageBlob);
-      if (uploadError) throw uploadError;
+      const filePath = functionData.path;
 
       const { data: signedUrlData, error: signedUrlError } = await supabase.storage
         .from('generated_images')
