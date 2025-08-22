@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Wand2, Download, Share2, Loader2, AlertCircle, Sparkles, Zap, Palette, Clock, Copy, CheckCircle, Settings } from 'lucide-react';
+import { Wand2, Download, Share2, Loader2, AlertCircle, Sparkles, Zap, Palette, Clock, Copy, CheckCircle, Settings, ChevronDown } from 'lucide-react';
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
